@@ -121,7 +121,7 @@
     border:1px solid rgba(255,255,255,.3); background:transparent; color:#fff;
   }
   #panelBotones label{ background:var(--tinta); color:#000; border-color:transparent; }
-  #archivos{ display:none; }
+  #archivos, #soloTextura{ display:none; }
 
   #flash{ position:fixed; inset:0; z-index:40; background:#fff; opacity:0; pointer-events:none; }
   #flash.dispara{ animation:destello .28s ease-out; }
@@ -167,9 +167,13 @@
     <button id="reintentar">Reintentar</button>
     <button id="fondoNegro">Fondo negro</button>
     <button id="limpiar">Ocultar dispersos</button>
+    <button id="neutro">Material neutro</button>
+    <button id="revisar">Revisar materiales</button>
+    <label for="soloTextura">Pegar textura</label>
     <button id="ocultarPanel">Cerrar</button>
   </div>
   <input type="file" id="archivos" multiple accept=".obj,.mtl,.OBJ,.MTL,image/*">
+  <input type="file" id="soloTextura" accept="image/*">
 </div>
 
 <div id="revision">
@@ -220,9 +224,15 @@ renderer.domElement.id = 'gl';
 document.body.appendChild(renderer.domElement);
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x404040, 1.2));
-const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+const dir = new THREE.DirectionalLight(0xffffff, 1.4);
 dir.position.set(2, 3, 2);
 scene.add(dir);
+
+/* relleno pegado a la cámara: garantiza que nada quede en sombra total */
+const relleno = new THREE.DirectionalLight(0xffffff, 0.9);
+relleno.position.set(0, 0, 1);
+camera.add(relleno);
+scene.add(camera);
 
 const testigo = new THREE.Mesh(
   new THREE.BoxGeometry(0.5, 0.5, 0.5),
@@ -243,6 +253,98 @@ let pivote = null;      // posición y rotación en el mundo
 let cuerpo = null;      // el objeto centrado dentro del pivote
 let escalaBase = 1;     // escala que hace que quepa en pantalla
 let escalaUsuario = 1;  // multiplicador del slider y la pinza
+
+const texturasFallidas = new Set();
+
+function vigilar(manager){
+  manager.onError = (url) => {
+    const n = url.split('/').pop().split('?')[0];
+    if (n.startsWith('blob:') || !n) return;
+    texturasFallidas.add(n);
+    anotar(`No se pudo cargar la textura: ${n}`, 'mal');
+  };
+  return manager;
+}
+
+/* un material negro casi siempre es Kd 0 0 0 o una textura que no llegó */
+function revisarMateriales(silencioso){
+  if (!objetoCargado) return;
+  let conMapa = 0, rotas = 0, oscuros = 0, transparentes = 0;
+
+  objetoCargado.traverse((n) => {
+    if (!n.isMesh) return;
+    const mats = Array.isArray(n.material) ? n.material : [n.material];
+    mats.forEach((m) => {
+      if (!m) return;
+      if (m.map){
+        conMapa++;
+        if (!m.map.image || !m.map.image.width){       // la textura nunca llegó
+          if (!silencioso) anotar(`Textura vacía en "${m.name || 'material'}" → se descarta`, 'mal');
+          m.map = null; rotas++;
+        }
+      }
+      if (m.color){
+        const lum = m.color.r * 0.299 + m.color.g * 0.587 + m.color.b * 0.114;
+        if (lum < 0.06 && !m.map){
+          if (!silencioso) anotar(`"${m.name || 'material'}" tiene Kd casi negro (${m.color.getHexString()}) → se aclara`, 'mal');
+          m.color.setHex(0xd8d8d8); oscuros++;
+        }
+      }
+      if (m.opacity !== undefined && m.opacity < 0.05){ m.opacity = 1; m.transparent = false; transparentes++; }
+      if (m.emissive) m.emissive.setHex(0x000000);
+      m.side = THREE.DoubleSide;
+      m.needsUpdate = true;
+    });
+  });
+
+  anotar(`Materiales: ${conMapa} con textura · ${rotas} textura(s) rota(s) · ${oscuros} color(es) negro(s) · ${transparentes} invisible(s)`,
+         (rotas || oscuros || transparentes) ? 'ok' : 'nota');
+  if (rotas) anotar('Si el modelo lleva textura, selecciona también los archivos de imagen al cargar del teléfono.', 'mal');
+  if (!silencioso) estado('Materiales revisados');
+}
+
+/* gris plano: si con esto se ve bien, la geometría está sana y el problema es el MTL */
+let materialesOriginales = null;
+function materialNeutro(){
+  if (!objetoCargado){ estado('Todavía no hay modelo'); return; }
+  if (materialesOriginales){
+    materialesOriginales.forEach((m, malla) => { malla.material = m; });
+    materialesOriginales = null;
+    estado('Materiales del MTL restaurados');
+    return;
+  }
+  materialesOriginales = new Map();
+  const gris = new THREE.MeshStandardMaterial({ color:0xdedede, roughness:0.6, metalness:0, side:THREE.DoubleSide });
+  objetoCargado.traverse((n) => {
+    if (!n.isMesh) return;
+    materialesOriginales.set(n, n.material);
+    n.material = gris;
+  });
+  estado('Material neutro aplicado');
+}
+
+/* salida de emergencia: pega una imagen como textura sin pasar por el MTL */
+function aplicarTextura(archivo){
+  if (!objetoCargado){ estado('Todavía no hay modelo'); return; }
+  const url = URL.createObjectURL(archivo);
+  new THREE.TextureLoader().load(url, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.flipY = true;
+    objetoCargado.traverse((n) => {
+      if (!n.isMesh) return;
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        m.map = tex;
+        if (m.color) m.color.setHex(0xffffff);   // el color multiplica la textura
+        m.needsUpdate = true;
+      });
+    });
+    materialesOriginales = null;
+    anotar(`Textura aplicada a mano: ${archivo.name}`, 'ok');
+    estado('Textura aplicada');
+  }, undefined, () => anotar(`No se pudo leer la imagen ${archivo.name}`, 'mal'));
+}
 
 let radioModelo = 1;      // radio del cuerpo principal en unidades del OBJ
 let objetoCargado = null; // la malla tal como salió del loader
@@ -385,6 +487,8 @@ function colocar(objeto){
   aplicarEscala();
 
   scene.remove(testigo);
+  materialesOriginales = null;
+  setTimeout(() => revisarMateriales(true), 1400);   // da tiempo a que bajen las texturas
   estado('Modelo listo');
   $('panel').classList.remove('on');
   setTimeout(() => $('ayuda').classList.add('oculto'), 6000);
@@ -488,6 +592,30 @@ async function revisarRuta(url){
   }catch(e){ anotar(`${url} → falló (${e.message})`, 'mal'); return false; }
 }
 
+/* el .mtl es texto plano: aquí se leen las rutas de textura tal cual están escritas */
+async function inspeccionarMTL(texto, comprobar){
+  const refs = [...texto.matchAll(/^[ \t]*(map_\w+|bump|disp|refl)[ \t]+(.+)$/gim)];
+  if (!refs.length){
+    anotar('El MTL no referencia ninguna textura: solo define colores.');
+    return [];
+  }
+  const archivos = [];
+  for (const r of refs){
+    const clave = r[1], valor = r[2].trim();
+    anotar(`${clave} → ${valor}`);
+    if (/^[a-zA-Z]:[\\/]/.test(valor) || valor.startsWith('/')){
+      anotar('  ⚠ Es una ruta absoluta de tu computadora. En el servidor no existe.', 'mal');
+    }
+    if (/[\\/]/.test(valor)){
+      anotar('  ⚠ Apunta a una subcarpeta. El archivo debe estar junto al HTML.', 'mal');
+    }
+    const nombre = valor.split(/\s+/).pop().split(/[\\/]/).pop();
+    archivos.push(nombre);
+    if (comprobar) await revisarRuta('./' + nombre);
+  }
+  return archivos;
+}
+
 async function cargarDesdeServidor(){
   log.innerHTML = '';
   anotar(`Origen: ${location.origin || 'file://'}`);
@@ -499,8 +627,19 @@ async function cargarDesdeServidor(){
     $('panel').classList.add('on');
     return;
   }
+  if (hayMtl){
+    try{
+      const texto = await (await fetch(MTL_URL, { cache:'no-store' })).text();
+      anotar('—');
+      anotar('Texturas declaradas en el MTL:');
+      await inspeccionarMTL(texto, true);
+      anotar('—');
+    }catch(e){ anotar('No se pudo leer el texto del MTL', 'mal'); }
+  }
+
+  const vigia = vigilar(new THREE.LoadingManager());
   const cargarObj = (mats) => {
-    const l = new OBJLoader();
+    const l = new OBJLoader(vigia);
     if (mats) l.setMaterials(mats);
     l.load(OBJ_URL, colocar, undefined, (e) => {
       anotar(`Error al leer el OBJ: ${e.message || e}`, 'mal');
@@ -508,7 +647,7 @@ async function cargarDesdeServidor(){
     });
   };
   if (hayMtl){
-    new MTLLoader().load(MTL_URL, (m) => { m.preload(); anotar('MTL aplicado', 'ok'); cargarObj(m); },
+    new MTLLoader(vigia).load(MTL_URL, (m) => { m.preload(); anotar('MTL aplicado', 'ok'); cargarObj(m); },
       undefined, () => { anotar('MTL falló; se carga sin material.', 'mal'); cargarObj(null); });
   } else { cargarObj(null); }
 }
@@ -521,12 +660,34 @@ $('archivos').addEventListener('change', async (ev) => {
   anotar(`${lista.length} archivo(s) seleccionados`);
 
   const mapa = new Map();
-  lista.forEach(f => mapa.set(f.name, URL.createObjectURL(f)));
-  const manager = new THREE.LoadingManager();
+  lista.forEach(f => mapa.set(f.name.toLowerCase(), URL.createObjectURL(f)));
+  const manager = vigilar(new THREE.LoadingManager());
+
+  /* tolera mayúsculas, rutas absolutas y extensiones distintas */
   manager.setURLModifier((url) => {
-    const nombre = url.split('/').pop().split('\\').pop();
-    return mapa.has(nombre) ? mapa.get(nombre) : url;
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url;
+    const bruto = decodeURIComponent(url).split(/[\\/]/).pop();
+    const clave = bruto.toLowerCase();
+    if (mapa.has(clave)) return mapa.get(clave);
+
+    const sinExt = clave.replace(/\.[^.]+$/, '');
+    for (const [k, v] of mapa){
+      if (k.replace(/\.[^.]+$/, '') === sinExt){
+        anotar(`"${bruto}" se resolvió como "${k}" (extensión distinta)`, 'ok');
+        return v;
+      }
+    }
+    if (imgs.length === 1){
+      anotar(`"${bruto}" no coincide con nada; se usa la única imagen: ${imgs[0].name}`, 'ok');
+      return mapa.get(imgs[0].name.toLowerCase());
+    }
+    anotar(`"${bruto}" no está entre los archivos que seleccionaste`, 'mal');
+    return url;
   });
+
+  const imgs = lista.filter(f => /\.(png|jpe?g|tga|bmp|webp)$/i.test(f.name));
+  anotar(imgs.length ? `Texturas incluidas: ${imgs.map(f => f.name).join(', ')}` : 'No incluiste ninguna imagen de textura.',
+         imgs.length ? 'ok' : 'mal');
 
   const fObj = lista.find(f => /\.obj$/i.test(f.name));
   const fMtl = lista.find(f => /\.mtl$/i.test(f.name));
@@ -536,7 +697,10 @@ $('archivos').addEventListener('change', async (ev) => {
   let mats = null;
   if (fMtl){
     anotar(`MTL: ${fMtl.name}`, 'ok');
-    mats = new MTLLoader(manager).parse(await fMtl.text(), '');
+    const textoMtl = await fMtl.text();
+    anotar('Texturas declaradas en el MTL:');
+    await inspeccionarMTL(textoMtl, false);
+    mats = new MTLLoader(manager).parse(textoMtl, '');
     mats.preload();
   }
   const l = new OBJLoader(manager);
@@ -647,6 +811,9 @@ $('verPanel').addEventListener('click', () => $('panel').classList.add('on'));
 $('ocultarPanel').addEventListener('click', () => $('panel').classList.remove('on'));
 $('reintentar').addEventListener('click', cargarDesdeServidor);
 $('limpiar').addEventListener('click', limpiarDispersos);
+$('neutro').addEventListener('click', materialNeutro);
+$('revisar').addEventListener('click', () => revisarMateriales(false));
+$('soloTextura').addEventListener('change', (e) => { if (e.target.files[0]) aplicarTextura(e.target.files[0]); });
 $('fondoNegro').addEventListener('click', (e) => {
   video.style.display = video.style.display === 'none' ? '' : 'none';
   camaraViva = video.style.display !== 'none' && !!stream;
