@@ -166,6 +166,7 @@
     <label for="archivos">Cargar del teléfono</label>
     <button id="reintentar">Reintentar</button>
     <button id="fondoNegro">Fondo negro</button>
+    <button id="limpiar">Ocultar dispersos</button>
     <button id="ocultarPanel">Cerrar</button>
   </div>
   <input type="file" id="archivos" multiple accept=".obj,.mtl,.OBJ,.MTL,image/*">
@@ -243,13 +244,86 @@ let cuerpo = null;      // el objeto centrado dentro del pivote
 let escalaBase = 1;     // escala que hace que quepa en pantalla
 let escalaUsuario = 1;  // multiplicador del slider y la pinza
 
+let radioModelo = 1;      // radio del cuerpo principal en unidades del OBJ
+let objetoCargado = null; // la malla tal como salió del loader
+
+/* oculta las partes que están muy lejos del cuerpo principal y vuelve a encuadrar */
+function limpiarDispersos(){
+  if (!objetoCargado){ estado('Todavía no hay modelo'); return; }
+  const m = medir(objetoCargado);
+  let ocultas = 0;
+  objetoCargado.traverse((n) => {
+    if (!n.isMesh) return;
+    const c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3());
+    if (c.distanceTo(m.centro) > m.radio * 3){ n.visible = false; ocultas++; }
+  });
+  if (!ocultas){ estado('No hay partes dispersas que ocultar'); return; }
+  anotar(`Se ocultaron ${ocultas} parte(s) dispersa(s)`, 'ok');
+  const objeto = objetoCargado;
+  if (pivote) scene.remove(pivote);
+  colocar(objeto);
+}
+
+/* mediana y percentil 95: descartan vértices sueltos que inflan la caja */
+function medir(objeto){
+  objeto.updateWorldMatrix(true, true);
+  const xs = [], ys = [], zs = [], puntos = [];
+  const v = new THREE.Vector3();
+
+  objeto.traverse((n) => {
+    const pos = n.isMesh && n.geometry?.attributes?.position;
+    if (!pos) return;
+    const paso = Math.max(1, Math.floor(pos.count / 30000));   // muestreo para no colgar el teléfono
+    for (let i = 0; i < pos.count; i += paso){
+      v.fromBufferAttribute(pos, i).applyMatrix4(n.matrixWorld);
+      puntos.push(v.x, v.y, v.z);
+      xs.push(v.x); ys.push(v.y); zs.push(v.z);
+    }
+  });
+
+  const mediana = (a) => { a.sort((p, q) => p - q); return a[Math.floor(a.length / 2)]; };
+  const centro = new THREE.Vector3(mediana(xs), mediana(ys), mediana(zs));
+
+  const dist = [];
+  for (let i = 0; i < puntos.length; i += 3){
+    dist.push(Math.hypot(puntos[i] - centro.x, puntos[i+1] - centro.y, puntos[i+2] - centro.z));
+  }
+  dist.sort((p, q) => p - q);
+
+  const radio = dist[Math.floor(dist.length * 0.95)] || dist[dist.length - 1] || 1;
+  const radioTotal = dist[dist.length - 1] || 1;
+
+  const caja = new THREE.Box3().setFromObject(objeto);
+  return { centro, radio, radioTotal, tam: caja.getSize(new THREE.Vector3()) };
+}
+
+/* un objeto no puede verse más grande que la pantalla: pasado ese punto la cámara queda adentro */
+function escalaMaxima(){
+  const radioAparente = Math.max(altoVisible(), anchoVisible()) * 0.75;
+  return radioAparente / (radioModelo * escalaBase) || 20;
+}
+
 function aplicarEscala(){
   if (!cuerpo) return;
+  const tope = escalaMaxima();
+  let topado = false;
+  if (escalaUsuario > tope){ escalaUsuario = tope; topado = true; }
+
   cuerpo.scale.setScalar(escalaBase * escalaUsuario);
-  $('valEscala').textContent = escalaUsuario.toFixed(escalaUsuario < 1 ? 2 : 1) + '×';
+
+  const ocupa = (2 * radioModelo * escalaBase * escalaUsuario) / altoVisible() * 100;
+  $('valEscala').textContent = `${escalaUsuario < 1 ? escalaUsuario.toFixed(2) : escalaUsuario.toFixed(1)}× · ${Math.round(ocupa)}%`;
+  if (topado) estado('Tamaño máximo: el modelo ya llena la pantalla');
 }
 
 function colocar(objeto){
+  /* transformaciones a cero: así medir() siempre parte de las unidades originales */
+  if (objeto.parent) objeto.parent.remove(objeto);
+  objeto.position.set(0, 0, 0);
+  objeto.rotation.set(0, 0, 0);
+  objeto.scale.set(1, 1, 1);
+  objeto.updateWorldMatrix(true, true);
+
   let vertices = 0;
   objeto.traverse((n) => {
     if (n.isMesh){
@@ -271,21 +345,36 @@ function colocar(objeto){
   }
   anotar(`Malla: ${vertices.toLocaleString('es-MX')} vértices`, 'ok');
 
-  const caja = new THREE.Box3().setFromObject(objeto);
-  const tam = caja.getSize(new THREE.Vector3());
-  const centro = caja.getCenter(new THREE.Vector3());
-  const mayor = Math.max(tam.x, tam.y, tam.z) || 1;
-  anotar(`Medidas del OBJ: ${tam.x.toFixed(3)} × ${tam.y.toFixed(3)} × ${tam.z.toFixed(3)}`);
+  const m = medir(objeto);
+  radioModelo = m.radio;
 
-  /* que ocupe el 60% del lado más corto de la pantalla, sea cual sea su unidad original */
-  const objetivo = Math.min(altoVisible(), anchoVisible()) * 0.6;
-  escalaBase = objetivo / mayor;
+  anotar(`Caja completa: ${m.tam.x.toFixed(3)} × ${m.tam.y.toFixed(3)} × ${m.tam.z.toFixed(3)}`);
+  anotar(`Radio del 95% de los vértices: ${m.radio.toExponential(3)}`);
+  if (m.radioTotal > m.radio * 2.2){
+    anotar(`Hay geometría dispersa: el radio total (${m.radioTotal.toExponential(2)}) es ${(m.radioTotal/m.radio).toFixed(1)}× mayor que el cuerpo principal. Se ignora para encuadrar.`, 'mal');
+  }
+
+  /* que el cuerpo principal ocupe el 70% del lado más corto de la pantalla */
+  const objetivo = Math.min(altoVisible(), anchoVisible()) * 0.70;
+  escalaBase = objetivo / (2 * m.radio);
   escalaUsuario = 1;
   $('escala').value = 0;
-  anotar(`Factor de escala calculado: ${escalaBase.toExponential(2)}`, 'ok');
+  anotar(`Factor de escala: ${escalaBase.toExponential(3)}`, 'ok');
 
-  objeto.position.set(-centro.x, -centro.y, -centro.z);   // centrado en su propio origen
+  objeto.position.set(-m.centro.x, -m.centro.y, -m.centro.z);   // centro robusto, no el de la caja
 
+  const partes = [];
+  objeto.traverse(n => { if (n.isMesh) partes.push(n); });
+  if (partes.length > 1){
+    anotar(`El OBJ trae ${partes.length} partes:`);
+    partes.slice(0, 10).forEach(n => {
+      const c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3());
+      anotar(`  · ${n.name || 'sin nombre'} — a ${c.distanceTo(m.centro).toExponential(2)} del centro`);
+    });
+    if (partes.length > 10) anotar(`  · … y ${partes.length - 10} más`);
+  }
+
+  objetoCargado = objeto;
   if (pivote) scene.remove(pivote);
   cuerpo = new THREE.Group();
   cuerpo.add(objeto);
@@ -353,9 +442,9 @@ lienzoGL.addEventListener('touchmove', (e) => {
     pivote.position.y = THREE.MathUtils.clamp(ini.pos.y - (c.y - ini.c.y) * upp, -limY, limY);
 
     const f = separacion(p) / (ini.d || 1);
-    escalaUsuario = THREE.MathUtils.clamp(ini.esc * f, 0.05, 20);
-    $('escala').value = Math.log10(escalaUsuario) * 50;   // slider en escala logarítmica
-    aplicarEscala();
+    escalaUsuario = Math.max(0.02, ini.esc * f);
+    aplicarEscala();                                       // aplica el tope si hace falta
+    $('escala').value = Math.log10(escalaUsuario) * 50;     // slider logarítmico
   }
   $('ayuda').classList.add('oculto');
 }, { passive:false });
@@ -379,6 +468,8 @@ addEventListener('mouseup', () => { arrastre = null; });
 $('escala').addEventListener('input', (e) => {
   escalaUsuario = Math.pow(10, e.target.value / 50);
   aplicarEscala();
+  const real = Math.log10(escalaUsuario) * 50;
+  if (Math.abs(real - e.target.value) > 1) e.target.value = real;   // rebota en el tope
   $('ayuda').classList.add('oculto');
 });
 
@@ -555,6 +646,7 @@ $('voltear').addEventListener('click', () => iniciarCamara(facing === 'environme
 $('verPanel').addEventListener('click', () => $('panel').classList.add('on'));
 $('ocultarPanel').addEventListener('click', () => $('panel').classList.remove('on'));
 $('reintentar').addEventListener('click', cargarDesdeServidor);
+$('limpiar').addEventListener('click', limpiarDispersos);
 $('fondoNegro').addEventListener('click', (e) => {
   video.style.display = video.style.display === 'none' ? '' : 'none';
   camaraViva = video.style.display !== 'none' && !!stream;
