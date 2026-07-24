@@ -281,6 +281,8 @@ function revisarMateriales(silencioso){
         if (!m.map.image || !m.map.image.width){       // la textura nunca llegó
           if (!silencioso) anotar(`Textura vacía en "${m.name || 'material'}" → se descarta`, 'mal');
           m.map = null; rotas++;
+          // sin textura, que al menos quede un color visible en vez de blanco/negro plano
+          if (m.color) m.color.setHex(0xcfcfcf);
         }
       }
       if (m.color){
@@ -488,7 +490,6 @@ function colocar(objeto){
 
   scene.remove(testigo);
   materialesOriginales = null;
-  setTimeout(() => revisarMateriales(true), 1400);   // da tiempo a que bajen las texturas
   estado('Modelo listo');
   $('panel').classList.remove('on');
   setTimeout(() => $('ayuda').classList.add('oculto'), 6000);
@@ -638,6 +639,10 @@ async function cargarDesdeServidor(){
   }
 
   const vigia = vigilar(new THREE.LoadingManager());
+  // en vez de un temporizador fijo, se revisan los materiales cuando el
+  // manager confirma que TODO terminó de cargar (obj + mtl + texturas)
+  vigia.onLoad = () => revisarMateriales(true);
+
   const cargarObj = (mats) => {
     const l = new OBJLoader(vigia);
     if (mats) l.setMaterials(mats);
@@ -662,6 +667,9 @@ $('archivos').addEventListener('change', async (ev) => {
   const mapa = new Map();
   lista.forEach(f => mapa.set(f.name.toLowerCase(), URL.createObjectURL(f)));
   const manager = vigilar(new THREE.LoadingManager());
+  manager.onLoad = () => revisarMateriales(true);
+
+  const imgs = lista.filter(f => /\.(png|jpe?g|tga|bmp|webp)$/i.test(f.name));
 
   /* tolera mayúsculas, rutas absolutas y extensiones distintas */
   manager.setURLModifier((url) => {
@@ -685,7 +693,6 @@ $('archivos').addEventListener('change', async (ev) => {
     return url;
   });
 
-  const imgs = lista.filter(f => /\.(png|jpe?g|tga|bmp|webp)$/i.test(f.name));
   anotar(imgs.length ? `Texturas incluidas: ${imgs.map(f => f.name).join(', ')}` : 'No incluiste ninguna imagen de textura.',
          imgs.length ? 'ok' : 'mal');
 
