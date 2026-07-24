@@ -1,26 +1,116 @@
-
+<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>OBJ AR Viewer</title>
-
 <style>
-body { margin: 0; overflow: hidden; background: black; }
-canvas { position: absolute; top: 0; left: 0; }
+  :root{
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --tinta: #ff2f6d;
+  }
+  *{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body{
+    margin:0; padding:0; height:100%; overflow:hidden;
+    background:#000; color:#fff;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    overscroll-behavior:none;
+  }
 
-#info {
-  position: absolute;
-  bottom: 10px;
-  width: 100%;
-  text-align: center;
-  color: white;
-  font-family: monospace;
-  z-index: 10;
-}
+  /* video de fondo: más estable que scene.background en iOS */
+  #cam{
+    position:fixed; inset:0; width:100%; height:100%;
+    object-fit:cover; z-index:0; background:#000;
+  }
+  #cam.espejo{ transform: scaleX(-1); }
+
+  canvas#gl{ position:fixed; inset:0; z-index:1; touch-action:none; }
+
+  #info{
+    position:fixed; top:0; left:0; right:0; z-index:5;
+    padding:14px 16px; font-size:12px; letter-spacing:.08em;
+    text-transform:uppercase; text-align:center;
+    text-shadow:0 1px 6px rgba(0,0,0,.9); pointer-events:none;
+  }
+
+  /* controles */
+  #barra{
+    position:fixed; left:0; right:0; z-index:6;
+    bottom: calc(24px + var(--safe-b));
+    display:flex; align-items:center; justify-content:center; gap:28px;
+  }
+  .btn{
+    -webkit-appearance:none; appearance:none; border:0; color:#fff;
+    background:rgba(0,0,0,.45); backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.35);
+    width:52px; height:52px; border-radius:50%;
+    font-size:18px; line-height:1; cursor:pointer;
+  }
+  .btn:active{ transform:scale(.94); }
+  #disparador{
+    width:78px; height:78px; border-radius:50%;
+    background:transparent; border:3px solid #fff; padding:5px;
+  }
+  #disparador span{
+    display:block; width:100%; height:100%; border-radius:50%;
+    background:#fff; transition:transform .12s ease;
+  }
+  #disparador:active span{ transform:scale(.86); }
+
+  /* pantalla de inicio: iOS exige gesto del usuario para la cámara */
+  #inicio{
+    position:fixed; inset:0; z-index:20;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:22px; background:#000; text-align:center; padding:32px;
+  }
+  #inicio h1{ font-size:15px; font-weight:500; letter-spacing:.22em; margin:0; }
+  #inicio p{ font-size:12px; opacity:.6; margin:0; max-width:30ch; line-height:1.7; }
+  #inicio button{
+    -webkit-appearance:none; appearance:none; cursor:pointer;
+    background:var(--tinta); color:#000; border:0; font:inherit;
+    font-size:13px; letter-spacing:.14em; text-transform:uppercase;
+    padding:16px 34px; border-radius:999px;
+  }
+
+  /* revisión de la foto */
+  #revision{
+    position:fixed; inset:0; z-index:30; display:none;
+    flex-direction:column; background:#000;
+  }
+  #revision.on{ display:flex; }
+  #revision img{
+    flex:1; min-height:0; width:100%; object-fit:contain;
+    -webkit-touch-callout: default; /* permite mantener presionado para guardar */
+  }
+  #accionesFoto{
+    display:flex; gap:12px; padding:16px 16px calc(16px + var(--safe-b));
+  }
+  #accionesFoto button{
+    -webkit-appearance:none; appearance:none; cursor:pointer;
+    flex:1; font:inherit; font-size:12px; letter-spacing:.12em;
+    text-transform:uppercase; padding:16px; border-radius:12px; border:0;
+  }
+  #guardar{ background:var(--tinta); color:#000; }
+  #cerrar{ background:transparent; color:#fff; border:1px solid rgba(255,255,255,.35) !important; }
+  #pista{
+    position:absolute; top:0; left:0; right:0; padding:14px;
+    font-size:11px; text-align:center; opacity:.75;
+    text-shadow:0 1px 6px #000; pointer-events:none;
+  }
+
+  #flash{
+    position:fixed; inset:0; z-index:40; background:#fff;
+    opacity:0; pointer-events:none;
+  }
+  #flash.dispara{ animation: destello .28s ease-out; }
+  @keyframes destello{ from{opacity:.9} to{opacity:0} }
+  @media (prefers-reduced-motion: reduce){
+    #flash.dispara{ animation:none; }
+  }
 </style>
 
-<!-- 🔥 IMPORT MAP (ESTO ARREGLA TODO) -->
 <script type="importmap">
 {
   "imports": {
@@ -28,114 +118,247 @@ canvas { position: absolute; top: 0; left: 0; }
   }
 }
 </script>
-
 </head>
-
 <body>
 
-<div id="info">Iniciando...</div>
+<video id="cam" playsinline autoplay muted></video>
+<div id="info">Iniciando…</div>
+
+<div id="barra">
+  <button class="btn" id="voltear" aria-label="Cambiar de cámara">⟲</button>
+  <button id="disparador" aria-label="Tomar foto"><span></span></button>
+  <button class="btn" id="reset" aria-label="Reiniciar vista">⌂</button>
+</div>
+
+<div id="inicio">
+  <h1>OBJ AR VIEWER</h1>
+  <p>Necesita permiso de cámara y una conexión segura (https o localhost).</p>
+  <button id="btnInicio">Activar cámara</button>
+</div>
+
+<div id="revision">
+  <div id="pista"></div>
+  <img id="foto" alt="Foto capturada">
+  <div id="accionesFoto">
+    <button id="cerrar">Volver</button>
+    <button id="guardar">Guardar foto</button>
+  </div>
+</div>
+
+<div id="flash"></div>
 
 <script type="module">
-
 import * as THREE from 'three';
 import { OrbitControls } from 'https://unpkg.com/three@0.158.0/examples/jsm/controls/OrbitControls.js';
 import { OBJLoader } from 'https://unpkg.com/three@0.158.0/examples/jsm/loaders/OBJLoader.js';
 import { MTLLoader } from 'https://unpkg.com/three@0.158.0/examples/jsm/loaders/MTLLoader.js';
 
-// ESCENA
+const $ = (id) => document.getElementById(id);
+const info = $('info');
+const video = $('cam');
+
+/* ---------- ESCENA ---------- */
 const scene = new THREE.Scene();
 
-// CÁMARA
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 100);
 camera.position.set(0, 0, 2);
 
-// RENDER
-const renderer = new THREE.WebGLRenderer({ alpha: true });
+// alpha + preserveDrawingBuffer: sin esto la captura sale en negro
+const renderer = new THREE.WebGLRenderer({
+  alpha: true,
+  antialias: true,
+  preserveDrawingBuffer: true
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
+renderer.domElement.id = 'gl';
 document.body.appendChild(renderer.domElement);
 
-// CONTROLES
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-// LUZ
 scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1));
+const direccional = new THREE.DirectionalLight(0xffffff, 0.8);
+direccional.position.set(1, 2, 3);
+scene.add(direccional);
 
-// 📁 RUTAS (MISMA CARPETA)
+/* ---------- MODELO ---------- */
 const OBJ_URL = "./mi_modelo.obj";
 const MTL_URL = "./mi_modelo.mtl";
+let modelo = null;
 
-// 🔥 CARGA MODELO
-const mtlLoader = new MTLLoader();
+function cargarOBJ(materiales) {
+  const objLoader = new OBJLoader();
+  if (materiales) objLoader.setMaterials(materiales);
+  objLoader.load(
+    OBJ_URL,
+    (object) => {
+      object.scale.set(0.05, 0.05, 0.05);
+      object.position.set(0, 0, -1);
+      modelo = object;
+      scene.add(object);
+      info.textContent = "Modelo listo";
+      setTimeout(() => { info.textContent = ""; }, 2500);
+    },
+    undefined,
+    (e) => { console.error("OBJ ERROR", e); info.textContent = "No se pudo cargar el OBJ"; }
+  );
+}
 
-mtlLoader.load(MTL_URL,
-  (materials) => {
-
-    console.log("MTL OK");
-
-    materials.preload();
-
-    const objLoader = new OBJLoader();
-    objLoader.setMaterials(materials);
-
-    objLoader.load(
-      OBJ_URL,
-      (object) => {
-
-        console.log("OBJ OK");
-
-        object.scale.set(0.05, 0.05, 0.05);
-        object.position.set(0, 0, -1);
-
-        scene.add(object);
-
-        document.getElementById("info").innerText =
-          "Modelo listo ✔";
-
-      },
-      undefined,
-      (e) => {
-        console.error("OBJ ERROR", e);
-        document.getElementById("info").innerText =
-          "Error OBJ (ver consola)";
-      }
-    );
-
-  },
+new MTLLoader().load(
+  MTL_URL,
+  (materiales) => { materiales.preload(); cargarOBJ(materiales); },
   undefined,
-  (e) => {
-    console.error("MTL ERROR", e);
-    document.getElementById("info").innerText =
-      "Error MTL";
-  }
+  (e) => { console.warn("MTL no disponible, se carga el OBJ sin material", e); cargarOBJ(null); }
 );
 
-// 📷 CÁMARA
-async function startCamera() {
+/* ---------- CÁMARA DEL DISPOSITIVO ---------- */
+let stream = null;
+let facing = 'environment';
+
+async function iniciarCamara(modo = facing) {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    info.textContent = "Este navegador no da acceso a la cámara";
+    return false;
+  }
+  if (stream) stream.getTracks().forEach(t => t.stop());
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" }
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: modo },
+        width:  { ideal: 1920 },
+        height: { ideal: 1080 }
+      }
     });
-
-    const video = document.createElement("video");
+    facing = modo;
     video.srcObject = stream;
-    video.setAttribute("playsinline", true);
+    video.classList.toggle('espejo', facing === 'user');
     await video.play();
-
-    scene.background = new THREE.VideoTexture(video);
-
-    console.log("Cámara OK");
-
+    return true;
   } catch (e) {
     console.error("CAM ERROR", e);
-    document.getElementById("info").innerText =
-      "Sin acceso a cámara";
+    info.textContent = (location.protocol === 'https:' || location.hostname === 'localhost')
+      ? "Sin acceso a la cámara: revisa los permisos del navegador"
+      : "La cámara requiere https";
+    return false;
   }
 }
 
-startCamera();
+/* ---------- CAPTURA ---------- */
+const lienzo = document.createElement('canvas');
+const ctx = lienzo.getContext('2d');
+let blobActual = null;
 
-// LOOP
+function componer() {
+  const gl = renderer.domElement;
+  lienzo.width = gl.width;
+  lienzo.height = gl.height;
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, lienzo.width, lienzo.height);
+
+  // video recortado tipo "cover", igual que se ve en pantalla
+  if (video.videoWidth) {
+    const escala = Math.max(lienzo.width / video.videoWidth, lienzo.height / video.videoHeight);
+    const w = video.videoWidth * escala;
+    const h = video.videoHeight * escala;
+    const x = (lienzo.width - w) / 2;
+    const y = (lienzo.height - h) / 2;
+    ctx.save();
+    if (facing === 'user') { ctx.translate(lienzo.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, x, y, w, h);
+    ctx.restore();
+  }
+
+  // render fresco del 3D encima
+  renderer.render(scene, camera);
+  ctx.drawImage(gl, 0, 0, lienzo.width, lienzo.height);
+}
+
+function nombreArchivo() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `AR_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
+}
+
+function tomarFoto() {
+  componer();
+  $('flash').classList.remove('dispara');
+  void $('flash').offsetWidth;
+  $('flash').classList.add('dispara');
+
+  lienzo.toBlob((blob) => {
+    if (!blob) { info.textContent = "No se pudo generar la foto"; return; }
+    blobActual = blob;
+    $('foto').src = URL.createObjectURL(blob);
+    $('pista').textContent = puedeCompartir()
+      ? "Guardar abre la hoja para compartir"
+      : "También puedes mantener presionada la imagen para guardarla";
+    $('revision').classList.add('on');
+  }, 'image/jpeg', 0.92);
+}
+
+function puedeCompartir() {
+  return !!(navigator.canShare && navigator.canShare({
+    files: [new File([new Blob()], 'x.jpg', { type: 'image/jpeg' })]
+  }));
+}
+
+async function guardarFoto() {
+  if (!blobActual) return;
+  const archivo = new File([blobActual], nombreArchivo(), { type: 'image/jpeg' });
+
+  // iOS: la hoja de compartir es la única ruta real a Fotos
+  if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
+    try {
+      await navigator.share({ files: [archivo] });
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('Share falló, se intenta descarga directa', e);
+    }
+  }
+
+  // Android y escritorio
+  const url = URL.createObjectURL(blobActual);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = archivo.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* ---------- UI ---------- */
+$('btnInicio').addEventListener('click', async () => {
+  const ok = await iniciarCamara();
+  $('inicio').style.display = 'none';
+  if (ok) info.textContent = "Cámara activa";
+});
+
+$('disparador').addEventListener('click', tomarFoto);
+$('guardar').addEventListener('click', guardarFoto);
+$('cerrar').addEventListener('click', () => {
+  $('revision').classList.remove('on');
+  const img = $('foto');
+  if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.removeAttribute('src');
+  blobActual = null;
+});
+
+$('voltear').addEventListener('click', () => {
+  iniciarCamara(facing === 'environment' ? 'user' : 'environment');
+});
+
+$('reset').addEventListener('click', () => {
+  camera.position.set(0, 0, 2);
+  controls.target.set(0, 0, -1);
+  controls.update();
+});
+
+/* ---------- LOOP ---------- */
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
@@ -143,14 +366,19 @@ function animate() {
 }
 animate();
 
-// RESIZE
-addEventListener("resize", () => {
+/* ---------- RESIZE / ROTACIÓN ---------- */
+function ajustar() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', ajustar);
+addEventListener('orientationchange', () => setTimeout(ajustar, 350));
+
+// iOS suspende el video al volver de segundo plano
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && video.srcObject) video.play().catch(() => {});
 });
-
 </script>
-
 </body>
 </html>
